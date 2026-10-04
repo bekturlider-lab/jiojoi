@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Доступ к материалам</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --accent:#5b8cff; --accent2:#2ecc71;
+    --text:#e8eaf0; --muted:#8891a7; --danger:#ff5b6a; --border:#262b36;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; min-height:100vh; background:var(--bg); color:var(--text);
+    font-family: -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    display:flex; align-items:center; justify-content:center; padding:24px;
+  }
+  .wrap{max-width:440px; width:100%; display:flex; flex-direction:column; gap:16px;}
+  h1{font-size:1.3rem; margin:0 0 4px;}
+  .sub{color:var(--muted); font-size:.9rem; margin:0;}
+  .card{background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:22px;}
+  label{display:block; font-size:.85rem; color:var(--muted); margin-bottom:6px;}
+  input[type=text], input[type=password]{
+    width:100%; padding:11px 12px; border-radius:9px; border:1px solid var(--border);
+    background:transparent; color:var(--text); font-size:1rem; margin-bottom:14px;
+  }
+  button.submit{
+    width:100%; padding:12px; border:none; border-radius:9px; background:var(--accent);
+    color:#fff; font-size:1rem; font-weight:600; cursor:pointer;
+  }
+  button.submit:disabled{opacity:.5; cursor:not-allowed}
+  .result{margin-top:12px; font-size:.9rem; padding:10px 12px; border-radius:8px; display:none;}
+  .result.ok{background:rgba(46,204,113,.12); color:var(--accent2); display:block;}
+  .result.bad{background:rgba(255,91,106,.12); color:var(--danger); display:block;}
+  .attempt-count{margin:0 0 8px; color:var(--muted); font-size:.9rem;}
+  .player-box{margin-top:16px; display:none;}
+  .player-box.show{display:block;}
+  .player-box video{width:100%; border-radius:8px; border:1px solid var(--border);}
+
+  .unlocks{display:flex; flex-wrap:wrap; gap:16px; margin-top:16px;}
+  .unlock-icon{
+    display:flex; flex-direction:column; align-items:center; gap:6px;
+    background:none; border:none; cursor:pointer; color:var(--text);
+    text-decoration:none; width:64px; padding:0; font-family:inherit;
+  }
+  .unlock-icon svg{width:46px; height:46px;}
+  .unlock-icon span{font-size:.7rem; color:var(--muted); text-align:center;}
+
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div>
+    <h1>Проверка допуска</h1>
+    <p class="sub">Введите пароль и нажмите «Отправить».</p>
+  </div>
+
+  <form class="card" id="accessForm">
+    <label for="pass">Пароль</label>
+    <input type="password" id="pass" minlength="8" maxlength="8" pattern="[A-Za-z]{8}" title="Введите ровно 8 английских букв" autocomplete="off" required>
+    <p class="attempt-count" id="attemptCount" aria-live="polite"></p>
+    <button class="submit" id="submitBtn" type="submit" disabled>Отправить</button>
+    <div id="result" class="result"></div>
+    <div id="downloadStats" class="result"></div>
+
+    <div class="unlocks" id="unlocks"></div>
+    <div class="player-box" id="playerBox"></div>
+  </form>
+</div>
+
+<script>
+/* ====== НАСТРОЙКИ (меняйте здесь) ====== */
+const PASSWORD = "Bekturag";
+
+/*
+  type: "word"  -> показывается только иконка Word, по клику файл скачивается
+
+  url  -> путь к файлу в этом же репозитории (например "files/joke1.mp4")
+          либо прямая ссылка на внешний файл
+*/
+const MILESTONES = [
+  { threshold: 30, type: "word", url: "win/Тестовые задания.docx", fileName: "Тестовые задания.docx" },
+];
+const VIDEO_MILESTONES = [
+  { threshold: 10, url: "win/Кот смеётся футаж #cat #dance #butifyoucloseyoureyes.mp4" },
+  { threshold: 20, url: "win/надо радоваться не надо напрягаться.mp4", loop: true },
+];
+/* ======================================== */
+
+let wordUnlockedThisPage = false;
+let sessionRequests = 0;
+let sharedTotal = 0;
+const shownVideoMilestones = new Set();
+const attemptCountEl = document.getElementById('attemptCount');
+const passEl = document.getElementById('pass');
+const submitBtn = document.getElementById('submitBtn');
+
+const ICON_WORD = `<svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect x="6" y="2" width="30" height="44" rx="3" fill="#2B579A"/>
+  <rect x="2" y="12" width="24" height="24" rx="2" fill="#2B579A"/>
+  <text x="14" y="29" font-family="Arial, sans-serif" font-size="14" font-weight="bold" fill="#fff" text-anchor="middle">W</text>
+</svg>`;
+
+function renderAttemptCount(){
+  attemptCountEl.textContent = `Общий счётчик: ${sharedTotal} ${requestWord(sharedTotal)}; ваши запросы в этой сессии: ${sessionRequests} ${requestWord(sessionRequests)}.`;
+}
+
+function requestWord(count){
+  const lastTwo = count % 100;
+  const lastOne = count % 10;
+  if(lastTwo >= 11 && lastTwo <= 14) return 'запросов';
+  if(lastOne === 1) return 'запрос';
+  if(lastOne >= 2 && lastOne <= 4) return 'запроса';
+  return 'запросов';
+}
+
+function encodePath(url){
+  return url.split('/').map(encodeURIComponent).join('/');
+}
+
+function openVideo(milestone){
+  const box = document.getElementById('playerBox');
+  box.innerHTML = `<video src="${encodePath(milestone.url)}" controls autoplay playsinline ${milestone.loop ? 'loop' : ''}></video>`;
+  box.classList.add('show');
+}
+
+function renderUnlocks(){
+  const wrap = document.getElementById('unlocks');
+  wrap.innerHTML = '';
+  MILESTONES.forEach(m => {
+    if(sharedTotal < m.threshold || m.type !== 'word' || !wordUnlockedThisPage) return;
+
+    const a = document.createElement('a');
+    a.className = 'unlock-icon';
+    a.href = encodePath(m.url);
+    a.download = m.fileName || 'document.docx';
+    a.innerHTML = ICON_WORD + '<span>Скачать</span>';
+    a.addEventListener('click', () => {
+      const statsEl = document.getElementById('downloadStats');
+      statsEl.className = 'result ok';
+      statsEl.textContent = `Статистика: ваши запросы в этой сессии — ${sessionRequests} ${requestWord(sessionRequests)}; общий счётчик — ${sharedTotal} ${requestWord(sharedTotal)}.`;
+    });
+    wrap.appendChild(a);
+  });
+}
+
+async function refreshSharedTotal(){
+  const response = await fetch('/api/stats', { cache: 'no-store' });
+  if(!response.ok) throw new Error('Unable to load shared count');
+  const data = await response.json();
+  sharedTotal = Math.max(sharedTotal, Number(data.total));
+  renderAttemptCount();
+  renderUnlocks();
+}
+
+async function initializeSharedCounter(){
+  const resultEl = document.getElementById('result');
+  try {
+    await refreshSharedTotal();
+    submitBtn.disabled = false;
+    setInterval(() => refreshSharedTotal().catch(() => {}), 5000);
+  } catch(error){
+    resultEl.className = 'result bad';
+    resultEl.textContent = 'Нет связи с общим счётчиком. Откройте страницу через сервер.';
+  }
+}
+
+async function handleSubmit(){
+  if(submitBtn.disabled) return;
+
+  const resultEl = document.getElementById('result');
+  const pass = document.getElementById('pass').value;
+  const passwordOk = pass === PASSWORD;
+  submitBtn.disabled = true;
+
+  try {
+    const response = await fetch('/api/attempt', { method: 'POST' });
+    if(!response.ok) throw new Error('Unable to submit request');
+    const data = await response.json();
+    sharedTotal = Number(data.total);
+    sessionRequests++;
+    renderAttemptCount();
+    passEl.value = '';
+
+    resultEl.className = 'result ' + (passwordOk ? 'ok' : 'bad');
+    resultEl.textContent = passwordOk ? 'Пароль принят.' : 'Пароль неверный.';
+
+    if(MILESTONES.some(m => m.type === 'word' && sharedTotal >= m.threshold)) {
+      wordUnlockedThisPage = true;
+    }
+    renderUnlocks();
+    const videoMilestone = VIDEO_MILESTONES.find(m => m.threshold === sharedTotal);
+    if(videoMilestone && !shownVideoMilestones.has(videoMilestone.threshold)) {
+      shownVideoMilestones.add(videoMilestone.threshold);
+      openVideo(videoMilestone);
+    }
+  } catch(error){
+    resultEl.className = 'result bad';
+    resultEl.textContent = 'Не удалось добавить запрос в общий счётчик. Проверьте подключение и повторите.';
+  } finally {
+    passEl.value = '';
+    submitBtn.disabled = false;
+  }
+}
+
+document.getElementById('accessForm').addEventListener('submit', event => {
+  event.preventDefault();
+  handleSubmit();
+});
+renderAttemptCount();
+renderUnlocks();
+initializeSharedCounter();
+</script>
+</body>
+</html>
